@@ -1,6 +1,6 @@
 #!/bin/bash
-
-# Copyright (c) 2014 hellofwy
+export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+# Copyright (c) 2016 Function Club
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -31,11 +31,10 @@ DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 . $DIR/sslib.sh
 
 usage () {
-    cat $DIR/sshelp
+    cat $DIR/README.txt
 }
 wrong_para_prompt() {
     echo "参数输入错误!"
-    echo "查看帮助：ssadmin.sh -h"
 }
 
 #根据用户文件生成ssserver配置文件
@@ -65,20 +64,20 @@ create_json () {
     ' $USER_FILE >> $JSON_FILE.tmp
     echo '}' >> $JSON_FILE.tmp
     mv $JSON_FILE.tmp $JSON_FILE
-
+    rm -rf /usr/local/shadowsocks/config.json
+    cp $JSON_FILE /usr/local/shadowsocks/config.json
 }
 
 run_ssserver () {
-    $SSSERVER -qq -c $JSON_FILE 2>/dev/null >/dev/null &
-    echo $! > $SSSERVER_PID 
+    python /usr/local/shadowsocks/shadowsocks/server.py -d start
 }
 
 check_ssserver () {
-    if [ -e $SSSERVER_PID ]; then
-        ps $(cat $SSSERVER_PID) 2>/dev/null | grep $SSSERVER_NAME 2>/dev/null
-        return $?
-    else
+    SSPID=$(ps -ef|grep 'python /usr/local/shadowsocks/shadowsocks/server.py -d start' |grep -v grep |awk '{print $2}')
+    if [[ $SSPID != "" ]]; then
         return 1
+    else
+        return 0
     fi
 }
 
@@ -96,13 +95,10 @@ start_ss () {
         echo "还没有用户，请先添加一个用户"
         return 1
     fi
-    if [ -e $SSSERVER_PID ]; then
-        if check_ssserver; then
-            echo 'ss服务已启动，同一实例不能启动多次！'
+    check_ssserver
+    if [[ $? == 1 ]]; then
+            echo 'SSR服务已启动，同一实例不能启动多次！'
             return 1
-        else
-            rm $SSSERVER_PID
-        fi
     fi
     create_json
 
@@ -114,42 +110,43 @@ start_ss () {
         fi
     fi
 
-    echo 'sscounter.sh启动中...'
+    echo 'sscounter启动中...'
     ( $DIR/sscounter.sh ) & 
     echo $! > $SSCOUNTER_PID
     if check_sscounter; then 
-        echo 'sscounter.sh已启动'
+        echo 'sscounter已启动'
     else
-        echo 'sscounter.sh启动失败'
+        echo 'sscounter启动失败'
         return 1
     fi
 
-    echo 'ssserver启动中...'
+    echo 'SSR启动中...'
     run_ssserver 
     sleep 1
-    if check_ssserver; then 
-        echo 'ssserver已启动'
+    check_ssserver
+    if [[ $? == 1 ]]; then
+        echo 'SSR已启动'
     else
-        echo 'ssserver启动失败'
+        echo 'SSR启动失败'
         return 1
     fi
 }
 
 stop_ss () {
-    if check_ssserver; then 
-        kill `cat $SSSERVER_PID`
-        rm $SSSERVER_PID 
+    check_ssserver
+    if [[ $? == 1 ]]; then
+        kill $SSPID
         del_ipt_chains 2> /dev/null
-        echo 'ssserver已关闭'
+        echo 'SSR已关闭'
     else
-        echo 'ssserver未启动'
+        echo 'SSR未启动'
     fi
     if check_sscounter; then 
         kill `cat $SSCOUNTER_PID`
         rm $SSCOUNTER_PID
-        echo 'sscounter.sh已关闭'
+        echo 'sscounter已关闭'
     else
-        echo 'sscounter.sh未启动'
+        echo 'sscounter未启动'
     fi
 }
 
@@ -158,30 +155,18 @@ restart_ss () {
     start_ss
 }
     
-soft_restart_ss () {
-    if check_ssserver; then 
-        kill -s SIGQUIT `cat $SSSERVER_PID`
-        echo 'ssserver已关闭'
-        kill `cat $SSCOUNTER_PID`
-        echo 'sscounter.sh已关闭'
-        rm $SSSERVER_PID $SSCOUNTER_PID
-        del_ipt_chains 2> /dev/null
-        start_ss
-    else
-        echo 'ssserver未启动'
-    fi
-}
 
 status_ss () {
-    if check_ssserver; then 
-        echo 'ssserver正在运行'
+    check_ssserver
+    if [[ $? == 1 ]]; then
+        echo 'SSR正在运行'
     else
-        echo 'ssserver未启动'
+        echo 'SSR未启动'
     fi
     if check_sscounter; then 
-        echo 'sscounter.sh正在运行'
+        echo 'sscounter正在运行'
     else
-        echo 'sscounter.sh未启动'
+        echo 'sscounter未启动'
     fi
 }
 
@@ -197,7 +182,7 @@ bytes2gb () {
 }
 check_port_range () {
     PORT=$1
-    if (( ($PORT > 0) && ($PORT <= 65535 ) )); then
+    if (( ($PORT > 0) && ($PORT <= 65535 ) && ($PORT != 137) && ($PORT !=138) && ($PORT != 53) && ($PORT != 80) )); then
         return 0
     else
         return 1
@@ -237,18 +222,64 @@ $PORT $PWORD $TLIMIT" >> $USER_FILE;
         return 1
     fi
 # 重新生成配置文件，并加载
-    if [ -e $SSSERVER_PID ]; then
         create_json
-        kill -s SIGQUIT `cat $SSSERVER_PID`
         add_rules $PORT
-        run_ssserver
-    fi
+        stop_ss
+	    start_ss
 # 更新流量记录文件
     update_or_create_traffic_file_from_users
     calc_remaining
 }
-
+add_user_more () {
+pport=$1
+var=$4
+until [ $var -le 1 ];do
+	PORT=$pport
+	if check_port_range $PORT; then
+		:
+	else
+		wrong_para_prompt;
+		return 1
+	fi
+	PWORD=$2
+	TLIMIT=$3
+	TLIMIT=`bytes2gb $TLIMIT`
+	if [ ! -e $USER_FILE ]; then
+echo "\
+# 以空格、制表符分隔
+# 端口 密码 流量限制
+# 2345 abcde 1000000" > $USER_FILE;
+	fi
+	cat $USER_FILE |
+awk '
+{
+	if($1=='$PORT') exit 1
+}'
+	if [ $? -eq 0 ]; then
+		echo "\
+$PORT $PWORD $TLIMIT" >> $USER_FILE;
+		else
+		echo "用户已存在!"
+		return 1
+	fi
+	# 重新生成配置文件，并加载
+	create_json
+	add_rules $PORT
+	var=$(($var - 1))
+	pport=$(($pport + 1))
+done; 
+	# 更新流量记录文件
+	update_or_create_traffic_file_from_users
+	calc_remaining
+	stop_ss
+	start_ss
+}
 del_user () {
+	if [ ! -e $USER_FILE ]; then
+        echo "还没有用户，请先添加一个用户"
+        return 1
+    fi
+
     if [ "$#" -ne 1 ]; then
         wrong_para_prompt;
         return 1
@@ -264,13 +295,15 @@ del_user () {
         sed -i '/^\s*'$PORT'\s/ d' $USER_FILE
     fi
 # 重新生成配置文件，并加载
-    if [ -e $SSSERVER_PID ]; then
+        check_ssserver
+        if [[ $? == 1 ]];then
+            kill $SSPID
+        fi
         create_json
-        kill -s SIGQUIT `cat $SSSERVER_PID`
         del_rules $PORT 2>/dev/null
         del_reject_rules $PORT 2>/dev/null
         run_ssserver
-    fi
+        clear
 # 更新流量记录文件
     update_or_create_traffic_file_from_users
     calc_remaining
@@ -307,12 +340,13 @@ change_user () {
         }' > $USER_FILE.tmp;
         mv $USER_FILE.tmp $USER_FILE
         # 重新生成配置文件，并加载
-        if [ -e $SSSERVER_PID ]; then
+            check_ssserver
+            if [[ $? == 1 ]];then
+            kill $SSPID
+            fi
             create_json
-            kill -s SIGQUIT `cat $SSSERVER_PID`
             add_rules $PORT
             run_ssserver
-        fi
         # 更新流量记录文件
         update_or_create_traffic_file_from_users
         calc_remaining
@@ -351,12 +385,13 @@ change_passwd () {
         }' > $USER_FILE.tmp;
         mv $USER_FILE.tmp $USER_FILE
         # 重新生成配置文件，并加载
-        if [ -e $SSSERVER_PID ]; then
+            check_ssserver
+            if [[ $? == 1 ]];then
+            kill $SSPID
+            fi
             create_json
-            kill -s SIGQUIT `cat $SSSERVER_PID`
             add_rules $PORT
             run_ssserver
-        fi
         # 更新流量记录文件
         update_or_create_traffic_file_from_users
         calc_remaining
@@ -585,6 +620,12 @@ reset_used () {
     calc_remaining
 }
 
+
+
+
+
+
+
 if [ "$#" -eq 0 ]; then
     usage
     exit 0
@@ -595,18 +636,12 @@ case $1 in
         exit 0;
         ;;
     -v|v|version )
-        echo 'ss-bash Version 1.0-beta.3, 2014-12-3, Copyright (c) 2014 hellofwy'
+        echo 'ssr-bash Version 1.0-beta1, 2016-12-6, Copyright (c) 2014-2016 hellofwy Modified by FunctionClub'
         exit 0;
         ;;
 esac
 if [ "$EUID" -ne 0 ]; then
-    echo "必需以root身份运行，请使用sudo等命令"
-    exit 1;
-fi
-if type $SSSERVER 2>&1 >/dev/null; then
-    :
-else
-    echo "无法找到ssserver程序，请在sslib.sh中指定其路径"
+    echo "必需以root身份运行"
     exit 1;
 fi
 case $1 in
@@ -614,6 +649,10 @@ case $1 in
         shift
         add_user $1 $2 $3
         ;;
+	addmore )
+		shift
+		add_user_more $1 $2 $3 $4 
+		;;
     del )
         shift
         del_user $1
